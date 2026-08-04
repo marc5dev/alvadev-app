@@ -4,7 +4,7 @@
 const http = require("http");
 
 // Change this text, push to GitHub, and watch it go live. That's your test.
-const MESSAGE = "Hello from the Hetzner VPS 👋";
+const MESSAGE = "Hello from the the grande world! 👋";
 const VERSION = "1.0.0";
 
 const server = http.createServer((req, res) => {
