@@ -1,0 +1,27 @@
+# This file is a robot recipe for GitHub Actions.
+# Every push to "main" makes GitHub run these steps for you.
+#
+# NOTE: this will show a red X until you add the two secrets
+# (VPS_HOST, VPS_SSH_KEY) in Part 11 of the master guide. That is expected.
+
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull latest code and rebuild the container on the VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/alvadev/app
+            git pull --ff-only
+            cd /opt/alvadev
+            docker compose up -d --build webapp
