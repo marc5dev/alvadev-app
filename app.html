@@ -1,0 +1,991 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#05060a">
+<title>ALVA ▚ FLUX — an interactive fluid</title>
+<meta name="description" content="A real-time GPU fluid simulation with 65,536 particles that spell words and dissolve when you touch them.">
+<style>
+  :root{
+    --ink:#eef1f8;
+    --dim:#7d879c;
+    --line:rgba(255,255,255,.10);
+    --glass:rgba(10,12,20,.42);
+    --accent:#7ea2ff;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:#05060a; color:var(--ink); overflow:hidden;
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+    text-rendering:optimizeLegibility;
+  }
+  canvas{position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none}
+
+  .hud{position:fixed; z-index:5; pointer-events:none; transition:opacity .45s ease, transform .45s ease}
+  .hud.hide{opacity:0; transform:translateY(-6px)}
+
+  /* ---------- top left: brand ---------- */
+  #brand{top:22px; left:24px}
+  #brand h1{
+    margin:0; font-size:15px; font-weight:650; letter-spacing:.34em; text-transform:uppercase;
+    display:flex; align-items:center; gap:10px;
+  }
+  #brand h1 .mark{
+    width:9px; height:9px; border-radius:2px; background:var(--accent);
+    box-shadow:0 0 14px 2px rgba(126,162,255,.75); animation:pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.7)}}
+  #brand p{margin:9px 0 0 19px; font-size:11.5px; color:var(--dim); letter-spacing:.14em; text-transform:uppercase}
+
+  /* ---------- top right: telemetry ---------- */
+  #stats{top:22px; right:24px; text-align:right; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.85; color:var(--dim)}
+  #stats b{color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums}
+  #stats .row{display:flex; gap:12px; justify-content:flex-end}
+  #stats .k{opacity:.62; letter-spacing:.1em; text-transform:uppercase}
+  #stats .bar{
+    margin-top:9px; width:132px; height:3px; border-radius:2px; background:rgba(255,255,255,.09);
+    overflow:hidden; margin-left:auto;
+  }
+  #stats .bar i{display:block; height:100%; width:60%; background:linear-gradient(90deg,#7ea2ff,#c88bff); transition:width .25s ease}
+
+  /* ---------- bottom: controls ---------- */
+  #dock{
+    left:50%; bottom:24px; transform:translateX(-50%); pointer-events:auto;
+    display:flex; flex-direction:column; align-items:center; gap:12px; width:min(94vw,780px);
+  }
+  #dock.hide{transform:translateX(-50%) translateY(6px)}
+  .strip{display:flex; gap:7px; flex-wrap:wrap; justify-content:center}
+  .chip{
+    appearance:none; border:1px solid var(--line); background:var(--glass); color:var(--ink);
+    padding:7px 13px; border-radius:999px; font:inherit; font-size:11.5px; letter-spacing:.12em;
+    text-transform:uppercase; cursor:pointer; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    transition:background .18s, border-color .18s, color .18s, transform .18s;
+  }
+  .chip:hover{background:rgba(255,255,255,.10); border-color:rgba(255,255,255,.26); transform:translateY(-1px)}
+  .chip[aria-pressed="true"]{background:rgba(126,162,255,.20); border-color:rgba(126,162,255,.62); color:#fff}
+  .chip .sw{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:-1px}
+  .hint{font-size:10.5px; color:var(--dim); letter-spacing:.16em; text-transform:uppercase; text-align:center}
+  .hint kbd{
+    font:inherit; font-size:10px; border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:1px 5px; margin:0 1px; color:var(--ink); background:rgba(255,255,255,.05);
+  }
+
+  /* ---------- intro veil ---------- */
+  #veil{
+    position:fixed; inset:0; z-index:9; display:grid; place-items:end center; text-align:center;
+    padding-bottom:22vh;
+    background:radial-gradient(ellipse at center, rgba(5,6,10,.25) 0%, rgba(5,6,10,.86) 78%);
+    transition:opacity .9s ease; cursor:crosshair;
+  }
+  #veil.gone{opacity:0; pointer-events:none}
+  #veil .lead{font-size:12px; letter-spacing:.42em; text-transform:uppercase; color:var(--ink); animation:breathe 3s ease-in-out infinite}
+  #veil .sub{margin-top:12px; font-size:10.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--dim)}
+  @keyframes breathe{0%,100%{opacity:.45}50%{opacity:1}}
+
+  #fallback{
+    position:fixed; inset:0; z-index:20; display:none; place-items:center; padding:32px; text-align:center;
+    background:#05060a; line-height:1.7;
+  }
+  #fallback p{color:var(--dim); max-width:460px}
+
+  @media (max-width:720px){
+    #brand p{display:none}
+    #stats{font-size:10px}
+    #dock{bottom:16px; gap:9px}
+    .hint{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){
+    #brand h1 .mark, #veil .lead{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<div class="hud" id="brand">
+  <h1><span class="mark"></span>Alva <span style="opacity:.4">&#9622;</span> Flux</h1>
+  <p>__MESSAGE__</p>
+</div>
+
+<div class="hud" id="stats">
+  <div class="row"><span class="k">fps</span><b id="s-fps">&mdash;</b></div>
+  <div class="row"><span class="k">particles</span><b id="s-par">65,536</b></div>
+  <div class="row"><span class="k">sim</span><b id="s-sim">&mdash;</b></div>
+  <div class="row"><span class="k">uptime</span><b id="s-up">&mdash;</b></div>
+  <div class="row"><span class="k">build</span><b id="s-ver">__VERSION__</b></div>
+  <div class="bar"><i id="s-bar"></i></div>
+</div>
+
+<div class="hud" id="dock">
+  <div class="strip" id="words"></div>
+  <div class="strip" id="palettes"></div>
+  <div class="hint">
+    drag to stir &middot; <kbd>space</kbd> burst &middot; <kbd>R</kbd> reset &middot; <kbd>S</kbd> save &middot; <kbd>H</kbd> hide ui
+  </div>
+</div>
+
+<div id="veil">
+  <div>
+    <div class="lead">Touch the fluid</div>
+    <div class="sub">drag anywhere</div>
+  </div>
+</div>
+
+<div id="fallback">
+  <div>
+    <h1 style="letter-spacing:.3em;text-transform:uppercase;font-size:15px">Alva &#9622; Flux</h1>
+    <p>This experience needs WebGL2, which this browser or device isn&rsquo;t providing.
+       Try a recent Chrome, Edge, Firefox or Safari with hardware acceleration enabled.</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+
+/* =====================================================================
+   ALVA // FLUX
+   A GPU fluid solver (Stam's stable fluids) driving 65,536 particles
+   that hold the shape of a word until you disturb them.
+   Zero dependencies. Everything below is hand-rolled WebGL2.
+   ===================================================================== */
+
+var canvas = document.getElementById('gl');
+var gl = canvas.getContext('webgl2', {
+  alpha: false, antialias: false, depth: false, stencil: false,
+  premultipliedAlpha: false, preserveDrawingBuffer: true,
+  powerPreference: 'high-performance'
+});
+
+if (!gl || !gl.getExtension('EXT_color_buffer_float')) {
+  document.getElementById('fallback').style.display = 'grid';
+  document.getElementById('veil').style.display = 'none';
+  return;
+}
+gl.getExtension('OES_texture_float_linear');
+
+/* ------------------------------- config ------------------------------ */
+
+var CFG = {
+  simRes: 160,          // velocity / pressure grid
+  dyeRes: 720,          // colour grid
+  densityDiss: 1.35,    // how fast colour fades
+  velocityDiss: 0.28,   // how fast motion fades
+  pressure: 0.82,
+  pressureIters: 22,
+  curl: 34,             // vorticity confinement — the swirly bit
+  splatRadius: 0.24,
+  splatForce: 5200,
+  particleSide: 256     // 256*256 = 65,536 particles
+};
+
+// hues are walked left-to-right across the word, so each palette reads as a
+// gradient rather than a set of unrelated colours.
+var PALETTES = [
+  { name: 'Aurora', swatch: '#7ea2ff', sat: 0.88, hues: [0.48, 0.58, 0.73], bg: [0.012, 0.016, 0.030] },
+  { name: 'Ember',  swatch: '#ff8a4c', sat: 0.92, hues: [0.99, 0.05, 0.12], bg: [0.030, 0.014, 0.010] },
+  { name: 'Bloom',  swatch: '#ff7ad9', sat: 0.86, hues: [0.72, 0.84, 0.94], bg: [0.026, 0.010, 0.026] },
+  { name: 'Chlor',  swatch: '#5ff0b0', sat: 0.85, hues: [0.30, 0.40, 0.48], bg: [0.008, 0.026, 0.022] },
+  { name: 'Mono',   swatch: '#e8ecf6', sat: 0.14, hues: [0.58, 0.60, 0.64], bg: [0.018, 0.019, 0.024] }
+];
+
+var WORDS = ['ALVADEV', 'HELLO', 'SHIP IT', 'CLAUDE', '2026', '❤'];
+
+var palette = 0, wordIndex = 0;
+
+/* ---------------------------- gl plumbing ---------------------------- */
+
+function compile(type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s), src);
+  }
+  return s;
+}
+
+function Program(vsSrc, fsSrc) {
+  var p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p));
+
+  this.program = p;
+  this.u = {};
+  var n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (var i = 0; i < n; i++) {
+    var name = gl.getActiveUniform(p, i).name.replace('[0]', '');
+    this.u[name] = gl.getUniformLocation(p, name);
+  }
+}
+Program.prototype.use = function () { gl.useProgram(this.program); return this; };
+
+/* fullscreen triangle-pair, shared by every pass */
+var quadVAO = gl.createVertexArray();
+gl.bindVertexArray(quadVAO);
+var quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+gl.bindVertexArray(null);
+
+var emptyVAO = gl.createVertexArray(); // for attribute-less particle draws
+
+function blit(target) {
+  if (target === null) {
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  } else {
+    gl.viewport(0, 0, target.width, target.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+  }
+  gl.bindVertexArray(quadVAO);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.bindVertexArray(null);
+}
+
+function makeFBO(w, h, internal, format, type, filter) {
+  gl.activeTexture(gl.TEXTURE0);
+  var tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.viewport(0, 0, w, h);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  return {
+    texture: tex, fbo: fbo, width: w, height: h,
+    texelSizeX: 1 / w, texelSizeY: 1 / h,
+    attach: function (id) {
+      gl.activeTexture(gl.TEXTURE0 + id);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      return id;
+    }
+  };
+}
+
+function makeDoubleFBO(w, h, internal, format, type, filter) {
+  var a = makeFBO(w, h, internal, format, type, filter);
+  var b = makeFBO(w, h, internal, format, type, filter);
+  return {
+    width: w, height: h, texelSizeX: a.texelSizeX, texelSizeY: a.texelSizeY,
+    read: a, write: b,
+    swap: function () { var t = this.read; this.read = this.write; this.write = t; }
+  };
+}
+
+/* ------------------------------ shaders ------------------------------ */
+
+var VERT = [
+'#version 300 es',
+'precision highp float;',
+'layout(location = 0) in vec2 aPos;',
+'out vec2 vUv; out vec2 vL; out vec2 vR; out vec2 vT; out vec2 vB;',
+'uniform vec2 texelSize;',
+'void main(){',
+'  vUv = aPos * 0.5 + 0.5;',
+'  vL = vUv - vec2(texelSize.x, 0.0);',
+'  vR = vUv + vec2(texelSize.x, 0.0);',
+'  vT = vUv + vec2(0.0, texelSize.y);',
+'  vB = vUv - vec2(0.0, texelSize.y);',
+'  gl_Position = vec4(aPos, 0.0, 1.0);',
+'}'].join('\n');
+
+function frag(body) {
+  return ['#version 300 es',
+          'precision highp float;',
+          'precision highp sampler2D;',
+          'in vec2 vUv; in vec2 vL; in vec2 vR; in vec2 vT; in vec2 vB;',
+          'out vec4 fragColor;'].join('\n') + '\n' + body;
+}
+
+var copyProg = new Program(VERT, frag([
+'uniform sampler2D uTexture;',
+'void main(){ fragColor = texture(uTexture, vUv); }'].join('\n')));
+
+var clearProg = new Program(VERT, frag([
+'uniform sampler2D uTexture; uniform float value;',
+'void main(){ fragColor = value * texture(uTexture, vUv); }'].join('\n')));
+
+var splatProg = new Program(VERT, frag([
+'uniform sampler2D uTarget; uniform float aspectRatio;',
+'uniform vec3 color; uniform vec2 point; uniform float radius;',
+'void main(){',
+'  vec2 p = vUv - point; p.x *= aspectRatio;',
+'  vec3 splat = exp(-dot(p, p) / radius) * color;',
+'  vec3 base = texture(uTarget, vUv).xyz;',
+'  fragColor = vec4(base + splat, 1.0);',
+'}'].join('\n')));
+
+var advectProg = new Program(VERT, frag([
+'uniform sampler2D uVelocity; uniform sampler2D uSource;',
+'uniform vec2 texelSize; uniform float dt; uniform float dissipation;',
+'void main(){',
+'  vec2 coord = vUv - dt * texture(uVelocity, vUv).xy * texelSize;',
+'  vec4 result = texture(uSource, coord);',
+'  fragColor = result / (1.0 + dissipation * dt);',
+'}'].join('\n')));
+
+var divergenceProg = new Program(VERT, frag([
+'uniform sampler2D uVelocity;',
+'void main(){',
+'  float L = texture(uVelocity, vL).x;',
+'  float R = texture(uVelocity, vR).x;',
+'  float T = texture(uVelocity, vT).y;',
+'  float B = texture(uVelocity, vB).y;',
+'  vec2 C = texture(uVelocity, vUv).xy;',
+'  if (vL.x < 0.0) L = -C.x;',
+'  if (vR.x > 1.0) R = -C.x;',
+'  if (vT.y > 1.0) T = -C.y;',
+'  if (vB.y < 0.0) B = -C.y;',
+'  fragColor = vec4(0.5 * (R - L + T - B), 0.0, 0.0, 1.0);',
+'}'].join('\n')));
+
+var curlProg = new Program(VERT, frag([
+'uniform sampler2D uVelocity;',
+'void main(){',
+'  float L = texture(uVelocity, vL).y;',
+'  float R = texture(uVelocity, vR).y;',
+'  float T = texture(uVelocity, vT).x;',
+'  float B = texture(uVelocity, vB).x;',
+'  fragColor = vec4(0.5 * (R - L - T + B), 0.0, 0.0, 1.0);',
+'}'].join('\n')));
+
+var vorticityProg = new Program(VERT, frag([
+'uniform sampler2D uVelocity; uniform sampler2D uCurl;',
+'uniform float curl; uniform float dt;',
+'void main(){',
+'  float L = texture(uCurl, vL).x;',
+'  float R = texture(uCurl, vR).x;',
+'  float T = texture(uCurl, vT).x;',
+'  float B = texture(uCurl, vB).x;',
+'  float C = texture(uCurl, vUv).x;',
+'  vec2 force = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));',
+'  force /= length(force) + 0.0001;',
+'  force *= curl * C;',
+'  force.y *= -1.0;',
+'  vec2 vel = texture(uVelocity, vUv).xy + force * dt;',
+'  fragColor = vec4(clamp(vel, -1000.0, 1000.0), 0.0, 1.0);',
+'}'].join('\n')));
+
+var pressureProg = new Program(VERT, frag([
+'uniform sampler2D uPressure; uniform sampler2D uDivergence;',
+'void main(){',
+'  float L = texture(uPressure, vL).x;',
+'  float R = texture(uPressure, vR).x;',
+'  float T = texture(uPressure, vT).x;',
+'  float B = texture(uPressure, vB).x;',
+'  float div = texture(uDivergence, vUv).x;',
+'  fragColor = vec4((L + R + B + T - div) * 0.25, 0.0, 0.0, 1.0);',
+'}'].join('\n')));
+
+var gradientProg = new Program(VERT, frag([
+'uniform sampler2D uPressure; uniform sampler2D uVelocity;',
+'void main(){',
+'  float L = texture(uPressure, vL).x;',
+'  float R = texture(uPressure, vR).x;',
+'  float T = texture(uPressure, vT).x;',
+'  float B = texture(uPressure, vB).x;',
+'  vec2 vel = texture(uVelocity, vUv).xy - vec2(R - L, T - B);',
+'  fragColor = vec4(vel, 0.0, 1.0);',
+'}'].join('\n')));
+
+/* the dye is composited with a vignette, filmic curve and dither */
+var displayProg = new Program(VERT, frag([
+'uniform sampler2D uTexture; uniform vec2 texelSize; uniform vec3 uBg; uniform float uTime;',
+'float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+'void main(){',
+'  vec3 c = texture(uTexture, vUv).rgb;',
+'  // cheap bloom: 4 diagonal taps',
+'  vec3 b = texture(uTexture, vUv + vec2( 2.5, 2.5) * texelSize).rgb',
+'         + texture(uTexture, vUv + vec2(-2.5, 2.5) * texelSize).rgb',
+'         + texture(uTexture, vUv + vec2( 2.5,-2.5) * texelSize).rgb',
+'         + texture(uTexture, vUv + vec2(-2.5,-2.5) * texelSize).rgb;',
+'  c += b * 0.085;',
+'  c += uBg;',
+'  c = c / (1.0 + c);',                        // reinhard tonemap
+'  c = pow(c, vec3(0.4545));',                 // gamma
+'  float d = length(vUv - 0.5);',
+'  c *= smoothstep(0.98, 0.32, d) * 0.34 + 0.66;',
+'  c += (hash(vUv * 1024.0 + fract(uTime)) - 0.5) * 0.012;',   // dither / grain
+'  fragColor = vec4(c, 1.0);',
+'}'].join('\n')));
+
+/* ----------------------- particles: update pass ---------------------- */
+
+var particleUpdate = new Program(VERT, frag([
+'uniform sampler2D uParticles;',   // xy = position (uv space), zw = velocity
+'uniform sampler2D uTargets;',     // xy = home position, z = hue, w = seed
+'uniform sampler2D uVelocity;',    // fluid velocity field
+'uniform float dt; uniform float uSpring; uniform float uDamp;',
+'uniform float uCoupling; uniform vec2 uFlowScale;',
+'uniform float uTime; uniform float uScatter;',
+'void main(){',
+'  vec4 p = texture(uParticles, vUv);',
+'  vec4 t = texture(uTargets, vUv);',
+'  vec2 pos = p.xy, vel = p.zw;',
+    // the solver stores velocity in grid units per step; multiplying by the
+    // grid texel size converts it to the uv-per-second the particles live in.
+'  vec2 fv = texture(uVelocity, pos).xy * uFlowScale;',
+'  float fs = length(fv);',
+'  if (fs > 3.0) fv *= 3.0 / fs;',
+'  vel += (fv - vel) * uCoupling * dt;',
+    // every particle has its own spring constant so the word snaps back
+    // in a loose wave instead of all at once
+'  vel += (t.xy - pos) * (uSpring * (0.65 + 0.7 * t.w)) * dt * (1.0 - uScatter);',
+    // a slow idle drift so the word breathes even when untouched
+'  float a = t.w * 6.2831 + uTime * 0.6;',
+'  vel += vec2(cos(a), sin(a)) * 0.02 * dt;',
+'  vel *= exp(-uDamp * dt);',            // frame-rate independent damping
+'  pos += vel * dt;',
+'  if (pos.x < 0.0) { pos.x = 0.0; vel.x = abs(vel.x) * 0.45; }',
+'  if (pos.x > 1.0) { pos.x = 1.0; vel.x = -abs(vel.x) * 0.45; }',
+'  if (pos.y < 0.0) { pos.y = 0.0; vel.y = abs(vel.y) * 0.45; }',
+'  if (pos.y > 1.0) { pos.y = 1.0; vel.y = -abs(vel.y) * 0.45; }',
+'  fragColor = vec4(pos, vel);',
+'}'].join('\n')));
+
+var particleDraw = new Program([
+'#version 300 es',
+'precision highp float;',
+'precision highp sampler2D;',
+'uniform sampler2D uParticles; uniform sampler2D uTargets;',
+'uniform float uSize; uniform float uAspect; uniform float uSat;',
+'out vec3 vColor; out float vGlow;',
+'vec3 hsv(float h, float s, float v){',
+'  vec3 k = fract(vec3(1.0, 2.0 / 3.0, 1.0 / 3.0) + h) * 6.0 - 3.0;',
+'  return v * mix(vec3(1.0), clamp(abs(k) - 1.0, 0.0, 1.0), s);',
+'}',
+'void main(){',
+'  int w = textureSize(uParticles, 0).x;',
+'  ivec2 uv = ivec2(gl_VertexID % w, gl_VertexID / w);',
+'  vec4 p = texelFetch(uParticles, uv, 0);',
+'  vec4 t = texelFetch(uTargets, uv, 0);',
+'  float speed = length(p.zw * vec2(uAspect, 1.0));',
+'  float home  = length((p.xy - t.xy) * vec2(uAspect, 1.0));',
+'  float heat  = clamp(speed * 0.9 + home * 2.6, 0.0, 1.0);',
+'  vColor = hsv(fract(t.z + heat * 0.16), uSat * (1.0 - heat * 0.7), 1.0);',
+    // the field is densely overdrawn, so each particle contributes only a
+    // little light — the bright core is the sum, not any single point
+'  vGlow = (0.10 + heat * 0.62) * (0.55 + 0.9 * t.w);',
+'  gl_PointSize = uSize * (1.0 + heat * 1.6);',
+'  gl_Position = vec4(p.xy * 2.0 - 1.0, 0.0, 1.0);',
+'}'].join('\n'),
+['#version 300 es',
+'precision highp float;',
+'in vec3 vColor; in float vGlow;',
+'out vec4 fragColor;',
+'void main(){',
+'  float d = length(gl_PointCoord - 0.5);',
+'  float a = smoothstep(0.5, 0.06, d);',
+'  a *= a;',
+'  fragColor = vec4(vColor * a * vGlow, 1.0);',
+'}'].join('\n'));
+
+/* ------------------------------ buffers ------------------------------ */
+
+var dye, velocity, divergence, curlFBO, pressure, particles, targets;
+var SIDE = CFG.particleSide, COUNT = SIDE * SIDE;
+
+function scaledRes(res) {
+  var aspect = gl.drawingBufferWidth / gl.drawingBufferHeight;
+  if (aspect < 1) aspect = 1 / aspect;
+  var min = Math.round(res), max = Math.round(res * aspect);
+  return gl.drawingBufferWidth > gl.drawingBufferHeight
+    ? { width: max, height: min }
+    : { width: min, height: max };
+}
+
+function initFluidBuffers() {
+  var s = scaledRes(CFG.simRes), d = scaledRes(CFG.dyeRes);
+  var HF = gl.HALF_FLOAT, L = gl.LINEAR, N = gl.NEAREST;
+  dye        = makeDoubleFBO(d.width, d.height, gl.RGBA16F, gl.RGBA, HF, L);
+  velocity   = makeDoubleFBO(s.width, s.height, gl.RG16F,   gl.RG,   HF, L);
+  divergence = makeFBO(s.width, s.height, gl.R16F, gl.RED, HF, N);
+  curlFBO    = makeFBO(s.width, s.height, gl.R16F, gl.RED, HF, N);
+  pressure   = makeDoubleFBO(s.width, s.height, gl.R16F, gl.RED, HF, N);
+  document.getElementById('s-sim').textContent = s.width + '×' + s.height;
+}
+
+function initParticleBuffers() {
+  particles = makeDoubleFBO(SIDE, SIDE, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
+  targets   = makeFBO(SIDE, SIDE, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
+}
+
+function seedParticles() {
+  var data = new Float32Array(COUNT * 4);
+  for (var i = 0; i < COUNT; i++) {
+    var a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * 0.75;
+    data[i * 4]     = 0.5 + Math.cos(a) * r * 0.9;
+    data[i * 4 + 1] = 0.5 + Math.sin(a) * r * 0.9;
+    data[i * 4 + 2] = 0;
+    data[i * 4 + 3] = 0;
+  }
+  [particles.read, particles.write].forEach(function (fb) {
+    gl.bindTexture(gl.TEXTURE_2D, fb.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, SIDE, SIDE, 0, gl.RGBA, gl.FLOAT, data);
+  });
+}
+
+/* --------------- text -> particle home positions (CPU) --------------- */
+
+var shaper = document.createElement('canvas');
+var sctx = shaper.getContext('2d', { willReadFrequently: true });
+
+function buildTargets(text) {
+  var W = 620;
+  var aspect = canvas.width / canvas.height;
+  var H = Math.max(180, Math.round(W / aspect));
+  shaper.width = W; shaper.height = H;
+
+  sctx.fillStyle = '#000'; sctx.fillRect(0, 0, W, H);
+  sctx.fillStyle = '#fff';
+  sctx.textAlign = 'center';
+  sctx.textBaseline = 'middle';
+
+  // grow the font until the word fills ~78% of the width (or 46% of height)
+  var size = 10;
+  for (var i = 0; i < 200; i++) {
+    sctx.font = '800 ' + (size + 4) + 'px ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif';
+    if (sctx.measureText(text).width > W * 0.72 || (size + 4) > H * 0.46) break;
+    size += 4;
+  }
+  sctx.font = '800 ' + size + 'px ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif';
+  sctx.fillText(text, W / 2, H / 2);
+
+  var px = sctx.getImageData(0, 0, W, H).data;
+  var spots = [];
+  for (var y = 0; y < H; y++) {
+    for (var x = 0; x < W; x++) {
+      if (px[(y * W + x) * 4] > 128) spots.push(x, y);
+    }
+  }
+
+  var data = new Float32Array(COUNT * 4);
+  var n = spots.length / 2;
+  for (var k = 0; k < COUNT; k++) {
+    var u, v;
+    if (n > 0) {
+      var j = (Math.random() * n) | 0;
+      u = (spots[j * 2] + Math.random()) / W;
+      v = 1 - (spots[j * 2 + 1] + Math.random()) / H;
+    } else {
+      u = Math.random(); v = Math.random();
+    }
+    data[k * 4]     = u;
+    data[k * 4 + 1] = v;
+    data[k * 4 + 2] = pickHue(u, v);
+    data[k * 4 + 3] = Math.random();
+  }
+
+  gl.bindTexture(gl.TEXTURE_2D, targets.texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, SIDE, SIDE, 0, gl.RGBA, gl.FLOAT, data);
+}
+
+// walk the active palette's hue ramp; t in [0,1]
+function paletteHue(t) {
+  var h = PALETTES[palette].hues;
+  t = ((t % 1) + 1) % 1;
+  var x = t * (h.length - 1);
+  var i = Math.min(h.length - 1, Math.floor(x));
+  var j = Math.min(h.length - 1, i + 1);
+  // take the short way round the wheel, so 0.99 -> 0.05 passes through red
+  // rather than sweeping backwards through green
+  var d = h[j] - h[i];
+  d -= Math.round(d);
+  return h[i] + d * (x - i);
+}
+
+function pickHue(u, v) {
+  return paletteHue(u * 0.7 + v * 0.3) + (Math.random() - 0.5) * 0.03;
+}
+
+/* ------------------------------- input ------------------------------- */
+
+var pointer = { x: 0.5, y: 0.5, dx: 0, dy: 0, down: false, moved: false, hue: Math.random() };
+var touched = false;
+
+function toUv(clientX, clientY) {
+  var r = canvas.getBoundingClientRect();
+  return { x: (clientX - r.left) / r.width, y: 1 - (clientY - r.top) / r.height };
+}
+
+function firstTouch() {
+  if (touched) return;
+  touched = true;
+  document.getElementById('veil').classList.add('gone');
+}
+
+canvas.addEventListener('pointerdown', function (e) {
+  firstTouch();
+  var p = toUv(e.clientX, e.clientY);
+  pointer.down = true; pointer.moved = false;
+  pointer.x = p.x; pointer.y = p.y; pointer.dx = 0; pointer.dy = 0;
+  pointer.hue = Math.random();
+  canvas.setPointerCapture(e.pointerId);
+});
+
+window.addEventListener('pointermove', function (e) {
+  var p = toUv(e.clientX, e.clientY);
+  pointer.dx = (p.x - pointer.x) * 5.5;
+  pointer.dy = (p.y - pointer.y) * 5.5;
+  pointer.x = p.x; pointer.y = p.y;
+  pointer.moved = Math.abs(pointer.dx) > 0 || Math.abs(pointer.dy) > 0;
+  if (pointer.moved && (pointer.down || !isCoarse)) firstTouch();
+}, { passive: true });
+
+window.addEventListener('pointerup', function () { pointer.down = false; });
+window.addEventListener('pointercancel', function () { pointer.down = false; });
+
+var isCoarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
+document.getElementById('veil').addEventListener('pointerdown', firstTouch);
+
+/* ------------------------------ splats ------------------------------- */
+
+function splat(x, y, dx, dy, color, radiusScale) {
+  splatProg.use();
+  gl.uniform1i(splatProg.u.uTarget, velocity.read.attach(0));
+  gl.uniform1f(splatProg.u.aspectRatio, canvas.width / canvas.height);
+  gl.uniform2f(splatProg.u.point, x, y);
+  gl.uniform3f(splatProg.u.color, dx, dy, 0);
+  gl.uniform1f(splatProg.u.radius, correctRadius(CFG.splatRadius / 100 * (radiusScale || 1)));
+  blit(velocity.write); velocity.swap();
+
+  gl.uniform1i(splatProg.u.uTarget, dye.read.attach(0));
+  gl.uniform3f(splatProg.u.color, color[0], color[1], color[2]);
+  blit(dye.write); dye.swap();
+}
+
+function correctRadius(r) {
+  var a = canvas.width / canvas.height;
+  return a > 1 ? r * a : r;
+}
+
+function hsvToRgb(h, s, v) {
+  var i = Math.floor(h * 6), f = h * 6 - i;
+  var p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: return [v, t, p];
+    case 1: return [q, v, p];
+    case 2: return [p, v, t];
+    case 3: return [p, q, v];
+    case 4: return [t, p, v];
+    default: return [v, p, q];
+  }
+}
+
+function paletteColor(jitter) {
+  var h = paletteHue(Math.random()) + (jitter || 0.05) * (Math.random() - 0.5);
+  var c = hsvToRgb(((h % 1) + 1) % 1, Math.max(0.25, PALETTES[palette].sat), 1);
+  return [c[0] * 0.22, c[1] * 0.22, c[2] * 0.22];
+}
+
+function burst(x, y, power) {
+  var n = 11;
+  for (var i = 0; i < n; i++) {
+    var a = (i / n) * Math.PI * 2 + Math.random() * 0.4;
+    splat(x, y, Math.cos(a) * power, Math.sin(a) * power, paletteColor(0.35), 2.4);
+  }
+  scatter = 1;
+}
+
+/* ------------------------- simulation stepping ----------------------- */
+
+var scatter = 0;
+
+function step(dt) {
+  gl.disable(gl.BLEND);
+
+  curlProg.use();
+  gl.uniform2f(curlProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1i(curlProg.u.uVelocity, velocity.read.attach(0));
+  blit(curlFBO);
+
+  vorticityProg.use();
+  gl.uniform2f(vorticityProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1i(vorticityProg.u.uVelocity, velocity.read.attach(0));
+  gl.uniform1i(vorticityProg.u.uCurl, curlFBO.attach(1));
+  gl.uniform1f(vorticityProg.u.curl, CFG.curl);
+  gl.uniform1f(vorticityProg.u.dt, dt);
+  blit(velocity.write); velocity.swap();
+
+  divergenceProg.use();
+  gl.uniform2f(divergenceProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1i(divergenceProg.u.uVelocity, velocity.read.attach(0));
+  blit(divergence);
+
+  clearProg.use();
+  gl.uniform1i(clearProg.u.uTexture, pressure.read.attach(0));
+  gl.uniform1f(clearProg.u.value, CFG.pressure);
+  blit(pressure.write); pressure.swap();
+
+  pressureProg.use();
+  gl.uniform2f(pressureProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1i(pressureProg.u.uDivergence, divergence.attach(0));
+  for (var i = 0; i < CFG.pressureIters; i++) {
+    gl.uniform1i(pressureProg.u.uPressure, pressure.read.attach(1));
+    blit(pressure.write); pressure.swap();
+  }
+
+  gradientProg.use();
+  gl.uniform2f(gradientProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1i(gradientProg.u.uPressure, pressure.read.attach(0));
+  gl.uniform1i(gradientProg.u.uVelocity, velocity.read.attach(1));
+  blit(velocity.write); velocity.swap();
+
+  advectProg.use();
+  gl.uniform2f(advectProg.u.texelSize, velocity.texelSizeX, velocity.texelSizeY);
+  var velId = velocity.read.attach(0);
+  gl.uniform1i(advectProg.u.uVelocity, velId);
+  gl.uniform1i(advectProg.u.uSource, velId);
+  gl.uniform1f(advectProg.u.dt, dt);
+  gl.uniform1f(advectProg.u.dissipation, CFG.velocityDiss);
+  blit(velocity.write); velocity.swap();
+
+  gl.uniform2f(advectProg.u.texelSize, dye.texelSizeX, dye.texelSizeY);
+  gl.uniform1i(advectProg.u.uVelocity, velocity.read.attach(0));
+  gl.uniform1i(advectProg.u.uSource, dye.read.attach(1));
+  gl.uniform1f(advectProg.u.dissipation, CFG.densityDiss);
+  blit(dye.write); dye.swap();
+}
+
+function stepParticles(dt, time) {
+  particleUpdate.use();
+  gl.uniform1i(particleUpdate.u.uParticles, particles.read.attach(0));
+  gl.uniform1i(particleUpdate.u.uTargets, targets.attach(1));
+  gl.uniform1i(particleUpdate.u.uVelocity, velocity.read.attach(2));
+  gl.uniform1f(particleUpdate.u.dt, dt);
+  gl.uniform1f(particleUpdate.u.uSpring, 26.0);
+  gl.uniform1f(particleUpdate.u.uDamp, 2.4);
+  gl.uniform1f(particleUpdate.u.uCoupling, 2.6);
+  gl.uniform2f(particleUpdate.u.uFlowScale, velocity.texelSizeX, velocity.texelSizeY);
+  gl.uniform1f(particleUpdate.u.uTime, time);
+  gl.uniform1f(particleUpdate.u.uScatter, scatter);
+  blit(particles.write); particles.swap();
+}
+
+function render(time) {
+  var bg = PALETTES[palette].bg;
+
+  displayProg.use();
+  gl.uniform1i(displayProg.u.uTexture, dye.read.attach(0));
+  gl.uniform2f(displayProg.u.texelSize, dye.texelSizeX, dye.texelSizeY);
+  gl.uniform3f(displayProg.u.uBg, bg[0], bg[1], bg[2]);
+  gl.uniform1f(displayProg.u.uTime, time);
+  blit(null);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  particleDraw.use();
+  gl.uniform1i(particleDraw.u.uParticles, particles.read.attach(0));
+  gl.uniform1i(particleDraw.u.uTargets, targets.attach(1));
+  gl.uniform1f(particleDraw.u.uSize, Math.max(1.0, 1.55 * dpr()));
+  gl.uniform1f(particleDraw.u.uAspect, canvas.width / canvas.height);
+  gl.uniform1f(particleDraw.u.uSat, PALETTES[palette].sat);
+  gl.bindVertexArray(emptyVAO);
+  gl.drawArrays(gl.POINTS, 0, COUNT);
+  gl.bindVertexArray(null);
+  gl.disable(gl.BLEND);
+}
+
+/* ------------------------------- loop -------------------------------- */
+
+function dpr() { return Math.min(window.devicePixelRatio || 1, 2); }
+
+function resize() {
+  var w = Math.floor(canvas.clientWidth * dpr());
+  var h = Math.floor(canvas.clientHeight * dpr());
+  if (canvas.width === w && canvas.height === h) return false;
+  canvas.width = w; canvas.height = h;
+  return true;
+}
+
+var last = performance.now(), t0 = last;
+var fpsAcc = 0, fpsFrames = 0, fpsShown = 0;
+var idleSince = performance.now();
+
+function frame(now) {
+  var dt = Math.min((now - last) / 1000, 1 / 30);
+  last = now;
+  var time = (now - t0) / 1000;
+
+  if (resize()) { initFluidBuffers(); buildTargets(WORDS[wordIndex]); }
+
+  // pointer drives the fluid
+  var speed = Math.hypot(pointer.dx, pointer.dy);
+  if (speed > 0.0004 && (pointer.down || !isCoarse)) {
+    var boost = pointer.down ? 1.0 : 0.42;
+    splat(pointer.x, pointer.y,
+          pointer.dx * CFG.splatForce * boost,
+          pointer.dy * CFG.splatForce * boost,
+          hsvToRgb(paletteHue(pointer.hue), Math.max(0.25, PALETTES[palette].sat), 1)
+            .map(function (c) { return c * 0.20 * boost; }),
+          1);
+    pointer.hue = (pointer.hue + 0.004) % 1;
+    idleSince = now;
+  }
+  pointer.dx *= 0.86; pointer.dy *= 0.86;
+
+  // when nobody is playing, the fluid keeps breathing on its own
+  if (now - idleSince > 3200 && Math.random() < 0.045) {
+    var a = Math.random() * Math.PI * 2;
+    var r = 0.18 + Math.random() * 0.3;
+    splat(0.5 + Math.cos(a) * r, 0.5 + Math.sin(a) * r * 0.7,
+          Math.cos(a + 2.1) * 900, Math.sin(a + 2.1) * 900,
+          paletteColor(0.2), 1.6);
+  }
+
+  scatter *= 0.965;
+
+  step(dt);
+  stepParticles(dt, time);
+  render(time);
+
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.5) {
+    fpsShown = Math.round(fpsFrames / fpsAcc);
+    document.getElementById('s-fps').textContent = fpsShown;
+    document.getElementById('s-bar').style.width = Math.min(100, fpsShown / 60 * 100) + '%';
+    fpsAcc = 0; fpsFrames = 0;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------ chrome ------------------------------- */
+
+var wordsEl = document.getElementById('words');
+WORDS.forEach(function (w, i) {
+  var b = document.createElement('button');
+  b.className = 'chip'; b.textContent = w; b.type = 'button';
+  b.setAttribute('aria-pressed', i === 0 ? 'true' : 'false');
+  b.addEventListener('click', function () { setWord(i); });
+  wordsEl.appendChild(b);
+});
+
+var palEl = document.getElementById('palettes');
+PALETTES.forEach(function (p, i) {
+  var b = document.createElement('button');
+  b.className = 'chip'; b.type = 'button';
+  b.innerHTML = '<span class="sw" style="background:' + p.swatch + '"></span>' + p.name;
+  b.setAttribute('aria-pressed', i === 0 ? 'true' : 'false');
+  b.addEventListener('click', function () { setPalette(i); });
+  palEl.appendChild(b);
+});
+
+function markPressed(container, index) {
+  Array.prototype.forEach.call(container.children, function (c, i) {
+    c.setAttribute('aria-pressed', i === index ? 'true' : 'false');
+  });
+}
+
+function setWord(i) {
+  wordIndex = ((i % WORDS.length) + WORDS.length) % WORDS.length;
+  buildTargets(WORDS[wordIndex]);
+  markPressed(wordsEl, wordIndex);
+  firstTouch();
+  burst(0.5, 0.5, 1500);
+}
+
+function setPalette(i) {
+  palette = ((i % PALETTES.length) + PALETTES.length) % PALETTES.length;
+  buildTargets(WORDS[wordIndex]);
+  markPressed(palEl, palette);
+  document.documentElement.style.setProperty('--accent', PALETTES[palette].swatch);
+  firstTouch();
+}
+
+function resetSim() {
+  clearProg.use();
+  gl.uniform1f(clearProg.u.value, 0);
+  gl.uniform1i(clearProg.u.uTexture, dye.read.attach(0));
+  blit(dye.write); dye.swap();
+  gl.uniform1i(clearProg.u.uTexture, velocity.read.attach(0));
+  blit(velocity.write); velocity.swap();
+  seedParticles();
+}
+
+function savePng() {
+  try {
+    var a = document.createElement('a');
+    a.download = 'alva-flux-' + Date.now() + '.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  } catch (e) { /* ignore */ }
+}
+
+window.addEventListener('keydown', function (e) {
+  var k = e.key.toLowerCase();
+  if (k >= '1' && k <= '9' && Number(k) <= WORDS.length) { setWord(Number(k) - 1); return; }
+  if (k === ' ') { e.preventDefault(); firstTouch(); burst(0.5, 0.5, 2600); return; }
+  if (k === 'p') { setPalette(palette + 1); return; }
+  if (k === 'r') { resetSim(); return; }
+  if (k === 's') { savePng(); return; }
+  if (k === 'h') {
+    Array.prototype.forEach.call(document.querySelectorAll('.hud'), function (el) {
+      el.classList.toggle('hide');
+    });
+  }
+});
+
+/* live server telemetry — proof the container is alive */
+function fmtUptime(s) {
+  s = Math.floor(s);
+  var d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  var m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if (d) return d + 'd ' + h + 'h';
+  if (h) return h + 'h ' + m + 'm';
+  if (m) return m + 'm ' + sec + 's';
+  return sec + 's';
+}
+function poll() {
+  fetch('/api/stats', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      document.getElementById('s-up').textContent = fmtUptime(j.uptime);
+      document.getElementById('s-ver').textContent = j.version;
+    })
+    .catch(function () {});
+}
+poll(); setInterval(poll, 5000);
+
+document.getElementById('s-par').textContent = COUNT.toLocaleString();
+
+/* ------------------------------- boot -------------------------------- */
+
+resize();
+initFluidBuffers();
+initParticleBuffers();
+seedParticles();
+buildTargets(WORDS[wordIndex]);
+
+// an opening flourish so the first frame is never empty
+(function opening() {
+  for (var i = 0; i < 9; i++) {
+    var a = Math.random() * Math.PI * 2, r = 0.1 + Math.random() * 0.32;
+    splat(0.5 + Math.cos(a) * r, 0.5 + Math.sin(a) * r * 0.7,
+          Math.cos(a) * 2200, Math.sin(a) * 2200, paletteColor(0.3), 1.8);
+  }
+})();
+
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

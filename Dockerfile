@@ -8,8 +8,9 @@ FROM node:24-alpine
 # 2. All following commands run inside /app in the image.
 WORKDIR /app
 
-# 3. Copy the server code from the repo into the image.
+# 3. Copy the server code and the app page from the repo into the image.
 COPY server.js .
+COPY app.html .
 
 # 4. Documentation: this app talks on port 3000.
 EXPOSE 3000
